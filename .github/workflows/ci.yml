@@ -160,3 +160,16 @@ jobs:
           cargo +${RUST_TOOLCHAIN} install --locked cargo-deny --version "$CARGO_DENY_VERSION"
       - run: cargo audit
       - run: cargo deny check advisories bans licenses sources
+
+  macos-arm:
+    name: macOS ARM (compile + tests)
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned toolchain
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy
+      # Compiles the IOKit FFI on an Apple-silicon runner. The physical-battery test is
+      # explicitly ignored because GitHub's VM has no AppleSmartBattery service.
+      - run: cargo +${{ env.RUST_TOOLCHAIN }} clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo +${{ env.RUST_TOOLCHAIN }} test --locked --all-targets --all-features

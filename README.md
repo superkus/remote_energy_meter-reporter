@@ -16,6 +16,57 @@ cargo run --quiet
 # exit status: 2
 ```
 
+## Measurement spike
+
+The `spike` command reads only selected integer fields from the undocumented
+`AppleSmartBattery.PowerTelemetryData` dictionary through public IOKit registry functions. It does **not** implement
+the production `PowerSource`. The collector validates numeric bounds and writes the independently calculated
+`derived_input_w` value to CSV; it does not reject a sample based on agreement between `SystemPowerIn` and voltage ×
+current. Those values remain unqualified candidate telemetry.
+
+The command defaults to 10 samples at a 1,000 ms interval. `--samples` accepts the inclusive range 1–36,000, and
+`--interval-ms` accepts 100–60,000 ms. Both flags are optional and may appear at most once. The scheduled span from the
+first sample to the last, `(samples - 1) × interval_ms`, may not exceed ten hours (36,000,000 ms). This cap preserves the
+five-minute qualification runs while preventing accidentally long foreground runs. Run `help` or `--help` with no
+other arguments to print this usage and the ten-hour constraint to standard output and exit successfully:
+
+```text
+usage: remote-energy-meter-reporter [help | --help | spike [--samples 1..36000] [--interval-ms 100..60000]]
+constraint: (samples - 1) * interval-ms <= 36000000 (10 hours)
+```
+
+```bash
+mkdir -p spike-data
+cargo run --release --locked -- spike --samples 300 --interval-ms 1000 \
+  > spike-data/idle-ac.csv
+```
+
+The command fails in controlled ways:
+
+| Condition | Standard error | Exit status |
+| --- | --- | ---: |
+| Invalid, unknown, repeated, missing, non-numeric, out-of-range, or over-ten-hour sampling arguments | `usage: remote-energy-meter-reporter [help \| --help \| spike [--samples 1..36000] [--interval-ms 100..60000]]` followed by the ten-hour constraint | 64 |
+| `spike` requested on a non-macOS platform | `WHOLE_SYSTEM_UNAVAILABLE` | 2 |
+| IOKit telemetry cannot be opened or read on macOS | `TELEMETRY_UNAVAILABLE: <reason>` | 3 |
+| A sample fails numeric safety checks | `TELEMETRY_UNAVAILABLE: candidate telemetry failed numeric safety checks` | 3 |
+| CSV header or row cannot be written to standard output | No additional diagnostic | 74 |
+
+The CSV contains elapsed time and candidate power/voltage/current/energy fields only—no model, hostname, serial,
+hardware UUID, username, account, or MAC address. `/spike-data/` is gitignored. A physical Apple-laptop test is ignored
+in normal CI and can be run explicitly on qualifying hardware:
+
+```bash
+cargo test --locked --test macos_telemetry_live -- --ignored
+```
+
+AC support requires synchronized five-minute idle, CPU-load, and GPU-load runs. For each run, the unadjusted candidate
+mean must be within ±10% of the unadjusted synchronized external wall-meter mean; post-hoc offsets, scaling, or boundary
+adjustments do not count. Reporter overhead must also remain below 0.5% of one CPU core and 30 MiB of physical memory.
+Battery support qualifies independently with the same three-run matrix against a predeclared credible power or energy
+reference. If that matrix cannot run, lacks a credible reference, or fails, battery remains unsupported and the future
+signed reporter must emit `WHOLE_SYSTEM_UNAVAILABLE` immediately on entry into battery mode and repeat it at the normal
+report cadence. An unsupported battery mode does not block AC-only support.
+
 ## Security baseline
 
 - No LAN, VPN, loopback, discovery result, or service network is trusted.
@@ -202,7 +253,8 @@ gh api --method PUT \
       "Local-setup reference scan",
       "Repository policy (hook self-tests)",
       "Rust (fmt + clippy + tests)",
-      "Rust dependency policy (audit + deny)"
+      "Rust dependency policy (audit + deny)",
+      "macOS ARM (compile + tests)"
     ]
   },
   "enforce_admins": true,
@@ -224,7 +276,7 @@ gh api --method PUT \
 JSON
 ```
 
-Verify the live policy through the API immediately. The response must show `strict: true`, all five check names above,
+Verify the live policy through the API immediately. The response must show `strict: true`, all six check names above,
 `enforce_admins: true`, `pull_requests: true`, `dismiss_stale_reviews: true`, `approvals: 0`,
 `conversations: true`, `force_pushes: false`, and `deletions: false`.
 
@@ -247,7 +299,7 @@ gh api \
 ```
 
 After protection is verified, create `dev` from the protected `main` baseline. All later work lands on `dev` or a feature
-branch and reaches `main` only through a pull request whose branch is up to date and whose five required checks pass.
+branch and reaches `main` only through a pull request whose branch is up to date and whose six required checks pass.
 Never push directly to `main`, including as an administrator. If a CI job is added, removed, or renamed, update and
 verify the required check contexts through the branch-protection API in the same pull request.
 

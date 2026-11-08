@@ -94,6 +94,7 @@ The required CI check names are:
 - `Repository policy (hook self-tests)`
 - `Rust (fmt + clippy + tests)`
 - `Rust dependency policy (audit + deny)`
+- `macOS ARM (compile + tests)`
 
 Release artifact signing/notarization checks become mandatory once packaging exists.
 

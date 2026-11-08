@@ -17,3 +17,7 @@ name = "remote-energy-meter-reporter"
 path = "src/main.rs"
 
 [dependencies]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "=0.10.1"
+io-kit-sys = "=0.5.0"
