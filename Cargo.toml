@@ -1,0 +1,19 @@
+[package]
+name = "remote-energy-meter-reporter"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.99.1"
+description = "Native zero-trust whole-system power reporter for Remote Energy Meter"
+license = "MIT"
+repository = "https://github.com/superkus/remote_energy_meter-reporter"
+publish = false
+
+[lib]
+name = "remote_energy_meter_reporter"
+path = "src/lib.rs"
+
+[[bin]]
+name = "remote-energy-meter-reporter"
+path = "src/main.rs"
+
+[dependencies]

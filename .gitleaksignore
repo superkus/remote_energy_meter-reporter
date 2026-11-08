@@ -1,0 +1,2 @@
+# Exact commit-qualified fingerprints only: <commit>:<file>:<rule>:<line>.
+# Empty initially; do not add regex/path allowlists.

@@ -1,0 +1,36 @@
+#!/bin/sh
+# Security-first local gate. Enable: git config core.hooksPath .githooks
+set -eu
+cd "$(git rev-parse --show-toplevel)"
+
+need() { command -v "$1" >/dev/null 2>&1 || { echo "missing required tool: $1" >&2; exit 1; }; }
+require_version() {
+  tool=$1 version_arg=$2 expected=$3
+  actual=$("$tool" "$version_arg" 2>/dev/null) || { echo "failed to read $tool version" >&2; exit 1; }
+  [ "$actual" = "$expected" ] || { echo "required $tool version: $expected" >&2; exit 1; }
+}
+need gitleaks
+need python3
+need cargo
+need cargo-audit
+need cargo-deny
+require_version gitleaks version "8.30.1"
+require_version cargo-audit --version "cargo-audit 0.22.2"
+require_version cargo-deny --version "cargo-deny 0.20.2"
+
+echo "▶ Secret scan"
+gitleaks git --staged --pre-commit --config .gitleaks.toml --redact --no-banner .
+echo "▶ Local-reference scan"
+python3 tools/check_local_refs.py --staged
+python3 -m unittest tools/test_check_local_refs.py tools/test_scan_git_objects.py
+
+echo "▶ Rust format, lint, and tests"
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-targets --all-features
+
+echo "▶ Rust dependency policy"
+cargo audit
+deny_output="$(cargo deny check advisories bans licenses sources)"
+printf '%s\n' "$deny_output"
+echo "✓ All pre-commit gates passed"

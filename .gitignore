@@ -1,0 +1,16 @@
+/target/
+__pycache__/
+*.py[cod]
+.DS_Store
+._*
+*.log
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.mobileconfig
+.local-refs-denylist
+# Measurement captures may contain machine/user context. Export only reviewed aggregate reports.
+/spike-data/

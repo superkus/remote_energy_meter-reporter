@@ -1,0 +1,327 @@
+#!/bin/sh
+# Client-side branch protection plus publication scans.
+set -eu
+umask 077
+LC_ALL=C
+export LC_ALL
+cd "$(git rev-parse --show-toplevel)"
+
+# Hard publication bounds. `ulimit -f` values are 512-byte blocks on POSIX shells.
+MAX_REF_UPDATES=1024
+MAX_REF_NAME_LENGTH=4096
+SMALL_STREAM_BLOCKS=16384
+MAX_REF_METADATA_BYTES=8388608
+OBJECT_INDEX_BLOCKS=262144
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "missing required tool: $1" >&2
+    exit 1
+  }
+}
+
+check_required_tools() {
+  need gitleaks
+  need python3
+  gitleaks_version=$(gitleaks version 2>/dev/null) || {
+    echo "failed to read gitleaks version" >&2
+    exit 1
+  }
+  [ "$gitleaks_version" = "8.30.1" ] || {
+    echo "required gitleaks version: 8.30.1" >&2
+    exit 1
+  }
+}
+
+create_private_files() {
+  tag_file=$(mktemp "${TMPDIR:-/tmp}/reporter-tag-metadata.XXXXXX") || {
+    echo "failed to create private tag metadata stream" >&2
+    exit 1
+  }
+  ref_file=$(mktemp "${TMPDIR:-/tmp}/reporter-ref-metadata.XXXXXX") || {
+    rm -f "$tag_file"
+    echo "failed to create private ref metadata stream" >&2
+    exit 1
+  }
+  object_ids=$(mktemp "${TMPDIR:-/tmp}/reporter-object-ids.XXXXXX") || {
+    rm -f "$tag_file" "$ref_file"
+    echo "failed to create private Git object index" >&2
+    exit 1
+  }
+  scan_specs=$(mktemp "${TMPDIR:-/tmp}/reporter-scan-specs.XXXXXX") || {
+    rm -f "$tag_file" "$ref_file" "$object_ids"
+    echo "failed to create private publication index" >&2
+    exit 1
+  }
+  commit_ranges=$(mktemp "${TMPDIR:-/tmp}/reporter-commit-ranges.XXXXXX") || {
+    rm -f "$tag_file" "$ref_file" "$object_ids" "$scan_specs"
+    echo "failed to create private revision index" >&2
+    exit 1
+  }
+  direct_targets=$(mktemp "${TMPDIR:-/tmp}/reporter-direct-targets.XXXXXX") || {
+    rm -f "$tag_file" "$ref_file" "$object_ids" "$scan_specs" "$commit_ranges"
+    echo "failed to create private target index" >&2
+    exit 1
+  }
+  history_revisions=$(mktemp "${TMPDIR:-/tmp}/reporter-history-revisions.XXXXXX") || {
+    rm -f "$tag_file" "$ref_file" "$object_ids" "$scan_specs" "$commit_ranges" "$direct_targets"
+    echo "failed to create private history index" >&2
+    exit 1
+  }
+}
+
+cleanup_private_files() {
+  rm -f "$tag_file" "$ref_file" "$object_ids" "$scan_specs" "$commit_ranges" \
+    "$direct_targets" "$history_revisions"
+}
+
+is_zero_object_id() {
+  case "$1" in
+    0000000000000000000000000000000000000000|0000000000000000000000000000000000000000000000000000000000000000) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+collect_ref_updates() {
+  policy_status=0
+  update_count=0
+  initial_main=0
+  while read -r local_ref local_sha remote_ref remote_sha; do
+    update_count=$((update_count + 1))
+    if [ "$update_count" -gt "$MAX_REF_UPDATES" ]; then
+      echo "✗ Ref update limit exceeded; refusing an unbounded publication scan." >&2
+      exit 1
+    fi
+    if [ "${#local_ref}" -gt "$MAX_REF_NAME_LENGTH" ] || [ "${#remote_ref}" -gt "$MAX_REF_NAME_LENGTH" ]; then
+      echo "✗ Ref metadata exceeds the scan limit." >&2
+      exit 1
+    fi
+    if ! (ulimit -f "$SMALL_STREAM_BLOCKS"; printf '%s\n%s\n' "$local_ref" "$remote_ref" >> "$ref_file"); then
+      echo "failed to collect bounded ref metadata" >&2
+      exit 1
+    fi
+    case "$local_sha" in
+      *[!0-9A-Fa-f]*|'') echo "invalid pushed object identifier" >&2; exit 1 ;;
+    esac
+    case "$remote_sha" in
+      *[!0-9A-Fa-f]*|'') echo "invalid remote object identifier" >&2; exit 1 ;;
+    esac
+    case ${#local_sha}:${#remote_sha} in
+      40:40|64:64) ;;
+      *) echo "invalid pushed object identifier" >&2; exit 1 ;;
+    esac
+    local_is_zero=0
+    remote_is_zero=0
+    is_zero_object_id "$local_sha" && local_is_zero=1
+    is_zero_object_id "$remote_sha" && remote_is_zero=1
+    case "$remote_ref" in
+      refs/heads/main)
+        if [ "$local_ref" = "refs/heads/main" ] && [ "$remote_is_zero" -eq 1 ] && [ "$local_is_zero" -eq 0 ]; then
+          initial_main=1
+        else
+          echo "✗ Direct push to 'main' refused; open a PR." >&2
+          policy_status=1
+        fi
+        ;;
+      refs/heads/master)
+        echo "✗ Direct push to 'master' refused; open a PR." >&2
+        policy_status=1
+        ;;
+    esac
+    [ "$local_is_zero" -eq 1 ] && continue
+    if [ "$remote_is_zero" -eq 1 ]; then
+      range=$local_sha
+    else
+      range=$remote_sha..$local_sha
+    fi
+    if ! printf '%s %s\n' "$local_sha" "$range" >> "$scan_specs"; then
+      echo "failed to collect bounded publication index" >&2
+      exit 1
+    fi
+  done
+  if [ "$initial_main" -eq 1 ] && [ "$update_count" -ne 1 ]; then
+    echo "✗ Initial main publication must be the only ref update." >&2
+    policy_status=1
+  fi
+  [ "$policy_status" -eq 0 ] || return "$policy_status"
+}
+
+verify_initial_main_destination() {
+  [ "$initial_main" -eq 1 ] || return 0
+
+  configured_origin=$(git remote get-url --push origin 2>/dev/null) || {
+    echo "✗ Unable to verify the intended bootstrap destination." >&2
+    exit 1
+  }
+  if [ "${1-}" != "origin" ] || [ "${2-}" != "$configured_origin" ]; then
+    echo "✗ Initial main publication is restricted to the configured origin." >&2
+    exit 1
+  fi
+  : > "$tag_file"
+  if ! (ulimit -f "$SMALL_STREAM_BLOCKS"; git ls-remote --refs origin > "$tag_file") 2>/dev/null; then
+    echo "✗ Unable to verify that the bootstrap destination is empty." >&2
+    exit 1
+  fi
+  if [ -s "$tag_file" ]; then
+    echo "✗ Initial main publication requires an empty destination." >&2
+    exit 1
+  fi
+  echo "! Allowing reviewed initial main publication; apply server-side branch protection immediately." >&2
+}
+
+scan_ref_metadata() {
+  ref_size=$(wc -c < "$ref_file")
+  if [ "$ref_size" -gt "$MAX_REF_METADATA_BYTES" ]; then
+    echo "ref metadata exceeds the scan limit" >&2
+    exit 1
+  fi
+  python3 tools/check_local_refs.py --ref-file "$ref_file"
+  if ! gitleaks stdin --config .gitleaks.toml --redact --no-banner < "$ref_file" >/dev/null 2>&1; then
+    echo "secret scan rejected private ref metadata" >&2
+    exit 1
+  fi
+}
+
+peel_annotated_target() {
+  target_sha=$1
+  tag_depth=0
+  target_type=$(git cat-file -t "$target_sha" 2>/dev/null) || {
+    echo "failed to inspect pushed Git object" >&2
+    exit 1
+  }
+  while [ "$target_type" = "tag" ]; do
+    tag_depth=$((tag_depth + 1))
+    if [ "$tag_depth" -gt 64 ]; then
+      echo "pushed annotated-tag chain exceeds the scan limit" >&2
+      exit 1
+    fi
+    printf '%s\n' "$target_sha" >> "$object_ids"
+    if ! (ulimit -f "$SMALL_STREAM_BLOCKS"; git cat-file tag "$target_sha" > "$tag_file") 2>/dev/null; then
+      echo "failed to collect bounded pushed tag metadata" >&2
+      exit 1
+    fi
+    IFS=' ' read -r header tag_target ignored < "$tag_file" || {
+      echo "failed to parse pushed tag metadata" >&2
+      exit 1
+    }
+    [ "$header" = "object" ] || {
+      echo "failed to parse pushed tag metadata" >&2
+      exit 1
+    }
+    case "$tag_target" in
+      *[!0-9A-Fa-f]*|'') echo "failed to parse pushed tag metadata" >&2; exit 1 ;;
+    esac
+    case ${#tag_target} in
+      40|64) ;;
+      *) echo "failed to parse pushed tag metadata" >&2; exit 1 ;;
+    esac
+    target_sha=$tag_target
+    target_type=$(git cat-file -t "$target_sha" 2>/dev/null) || {
+      echo "failed to inspect pushed tag target" >&2
+      exit 1
+    }
+  done
+}
+
+collect_publication_roots() {
+  if ! LC_ALL=C sort -u "$scan_specs" -o "$scan_specs"; then
+    echo "failed to bound pushed publication index" >&2
+    exit 1
+  fi
+  while read -r local_sha range; do
+    [ -n "$local_sha" ] || continue
+    printf '%s\n' "$range" >> "$history_revisions"
+
+    # Peel annotated tags privately. Their tag objects are retained while the
+    # final target determines whether commit history or a direct object is walked.
+    peel_annotated_target "$local_sha"
+    case "$target_type" in
+      commit) printf '%s\n' "$range" >> "$commit_ranges" ;;
+      tree|blob) printf '%s\n' "$target_sha" >> "$direct_targets" ;;
+      *)
+        echo "unsupported pushed Git object type" >&2
+        exit 1
+        ;;
+    esac
+  done < "$scan_specs"
+
+  for index in "$commit_ranges" "$direct_targets" "$history_revisions"; do
+    if ! LC_ALL=C sort -u "$index" -o "$index"; then
+      echo "failed to bound pushed revision index" >&2
+      exit 1
+    fi
+  done
+}
+
+scan_commit_ranges() {
+  [ -s "$commit_ranges" ] || return 0
+  log_opts=""
+  while IFS= read -r revision; do
+    log_opts="${log_opts}${log_opts:+ }${revision}"
+  done < "$commit_ranges"
+  gitleaks git --config .gitleaks.toml --redact --no-banner --log-opts="$log_opts" .
+}
+
+enumerate_target_objects() {
+  set --
+  while IFS= read -r revision; do
+    set -- "$@" "$revision"
+  done < "$commit_ranges"
+  while IFS= read -r target; do
+    set -- "$@" "$target"
+  done < "$direct_targets"
+  [ "$#" -gt 0 ] || return 0
+  if ! (ulimit -f "$OBJECT_INDEX_BLOCKS"; git rev-list --objects --no-object-names "$@" -- >> "$object_ids") 2>/dev/null; then
+    echo "failed to enumerate bounded pushed Git objects" >&2
+    exit 1
+  fi
+}
+
+scan_object_streams() {
+  if ! LC_ALL=C sort -u "$object_ids" -o "$object_ids"; then
+    echo "failed to bound pushed Git object index" >&2
+    exit 1
+  fi
+  [ -s "$object_ids" ] || return 0
+  # The helper validates each complete object and its shared limits while one
+  # persistent cat-file process feeds one private Gitleaks stdin stream.
+  if ! python3 tools/scan_git_objects.py "$object_ids"; then
+    echo "secret scan rejected private pushed Git objects" >&2
+    exit 1
+  fi
+}
+
+scan_local_reference_history() {
+  [ -s "$history_revisions" ] || return 0
+  set -- --history
+  while IFS= read -r revision; do
+    set -- "$@" --revision "$revision"
+  done < "$history_revisions"
+  if ! python3 tools/check_local_refs.py "$@"; then
+    echo "local-reference scan rejected pushed history" >&2
+    exit 1
+  fi
+}
+
+scan_publications() {
+  collect_publication_roots
+  scan_commit_ranges
+  enumerate_target_objects
+  scan_object_streams
+  scan_local_reference_history
+}
+
+main() {
+  check_required_tools
+  create_private_files
+  trap cleanup_private_files EXIT
+  trap 'exit 1' HUP INT TERM
+
+  collect_ref_updates
+  verify_initial_main_destination "$@"
+  scan_ref_metadata
+  scan_publications
+  echo "✓ Pre-push publication gates passed"
+}
+
+main "$@"

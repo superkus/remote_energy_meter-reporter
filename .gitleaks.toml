@@ -1,0 +1,7 @@
+title = "remote-energy-meter-reporter gitleaks config"
+
+[extend]
+useDefault = true
+
+# No regex or path allowlist. Any reviewed false positive must use one exact,
+# commit-qualified fingerprint in .gitleaksignore.

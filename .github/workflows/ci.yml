@@ -1,0 +1,162 @@
+name: CI
+
+on:
+  push:
+    branches: [dev, main]
+    tags: ["**"]
+  pull_request:
+    branches: [dev, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_TOOLCHAIN: "1.99.1"
+  GITLEAKS_VERSION: "8.30.1"
+  GITLEAKS_LINUX_X64_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+  CARGO_AUDIT_VERSION: "0.22.2"
+  CARGO_DENY_VERSION: "0.20.2"
+
+jobs:
+  secrets:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Install verified Gitleaks release
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          archive_path="${RUNNER_TEMP}/${archive}"
+          install_dir="${RUNNER_TEMP}/gitleaks-bin"
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            --connect-timeout 10 --max-time 120 \
+            --output "$archive_path" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
+          printf '%s  %s\n' "$GITLEAKS_LINUX_X64_SHA256" "$archive_path" | sha256sum --check --strict
+          mkdir "$install_dir"
+          tar -xzf "$archive_path" -C "$install_dir" gitleaks
+          test "$("$install_dir/gitleaks" version)" = "$GITLEAKS_VERSION"
+          printf '%s\n' "$install_dir" >> "$GITHUB_PATH"
+      - name: Scan full Git history
+        run: gitleaks git --config .gitleaks.toml --redact --no-banner --log-opts="--all HEAD" .
+      - name: Scan commit and annotated-tag messages
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          export LC_ALL=C
+          object_ids="${RUNNER_TEMP}/gitleaks-object-ids"
+          ref_names="${RUNNER_TEMP}/gitleaks-ref-names"
+          cleanup() { rm -f "$object_ids" "$ref_names"; }
+          trap cleanup EXIT
+          trap 'exit 1' HUP INT TERM
+
+          # Scan every fetched ref name plus the triggering ref through a private,
+          # bounded stream. Scanner output is suppressed so ref content cannot
+          # enter diagnostics even when a rule rejects it.
+          (ulimit -f 16384; git for-each-ref --format='%(refname)' > "$ref_names")
+          trigger_ref="${GITHUB_REF-}"
+          if [[ -n "$trigger_ref" ]]; then
+            if (( ${#trigger_ref} > 4096 )) || [[ "$trigger_ref" == *$'\n'* || "$trigger_ref" == *$'\r'* ]]; then
+              echo "triggering ref metadata exceeds the scan limit" >&2
+              exit 1
+            fi
+            printf '%s\n' "$trigger_ref" >> "$ref_names"
+          fi
+          ref_count=0
+          while IFS= read -r ref_name; do
+            ((++ref_count <= 1000000)) || {
+              echo "fetched ref count exceeds the scan limit" >&2
+              exit 1
+            }
+            (( ${#ref_name} <= 4096 )) || {
+              echo "fetched ref metadata exceeds the scan limit" >&2
+              exit 1
+            }
+          done < "$ref_names"
+          (( $(wc -c < "$ref_names") <= 8388608 )) || {
+            echo "fetched ref metadata exceeds the aggregate scan limit" >&2
+            exit 1
+          }
+          if ! gitleaks stdin --config .gitleaks.toml --redact --no-banner < "$ref_names" >/dev/null 2>&1; then
+            echo "secret scan rejected private ref metadata" >&2
+            exit 1
+          fi
+
+          # A fresh checkout contains fetched objects only. Scanning every object
+          # in its object database covers all payloads reachable from fetched refs,
+          # including lightweight tags and annotated tags targeting blobs or trees.
+          (ulimit -f 262144; git cat-file --batch-all-objects --batch-check='%(objectname)' > "$object_ids")
+          # One persistent cat-file process validates complete per-object payloads,
+          # their types and shared bounds. One Gitleaks stdin process scans the
+          # newline-separated object streams without disclosing rejected content.
+          if ! python3 tools/scan_git_objects.py "$object_ids"; then
+            echo "secret scan rejected private fetched Git objects" >&2
+            exit 1
+          fi
+
+  local-refs:
+    name: Local-setup reference scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - run: python3 tools/check_local_refs.py
+      - run: python3 tools/check_local_refs.py --history
+      - run: python3 -m unittest tools/test_check_local_refs.py tools/test_scan_git_objects.py
+
+  repository-policy:
+    name: Repository policy (hook self-tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: sh .githooks/pre-commit.test.sh
+      - run: sh .githooks/commit-msg.test.sh
+      - run: sh .githooks/pre-push.test.sh
+
+  rust:
+    name: Rust (fmt + clippy + tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned toolchain
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy
+      - run: cargo +${{ env.RUST_TOOLCHAIN }} fmt --all -- --check
+      - run: cargo +${{ env.RUST_TOOLCHAIN }} clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo +${{ env.RUST_TOOLCHAIN }} test --locked --all-targets --all-features
+      - name: Baseline executable fails closed
+        run: |
+          cargo +${RUST_TOOLCHAIN} build --locked
+          sh tests/fail_closed_executable.test.sh
+
+  dependency-policy:
+    name: Rust dependency policy (audit + deny)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned toolchain
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+      - name: Install pinned policy tools
+        run: |
+          cargo +${RUST_TOOLCHAIN} install --locked cargo-audit --version "$CARGO_AUDIT_VERSION"
+          cargo +${RUST_TOOLCHAIN} install --locked cargo-deny --version "$CARGO_DENY_VERSION"
+      - run: cargo audit
+      - run: cargo deny check advisories bans licenses sources
