@@ -5,16 +5,133 @@ Native zero-trust whole-system power reporter for
 
 ## Current status
 
-**Measurement qualification only. No installable reporter exists yet.** The executable deliberately exits with
-`WHOLE_SYSTEM_UNAVAILABLE`. Apple exposes no documented public API for whole-system AC watts; Apple-silicon support
-will be enabled only if a foreground hardware spike validates candidate laptop telemetry against an external wall meter.
-CPU/GPU/package values and estimates are never relabelled as whole-system power.
+**The code-only Apple-silicon measurement spike passes on AC and battery for the tested laptop. No installable reporter
+exists yet.** The executable still exits with `WHOLE_SYSTEM_UNAVAILABLE` because production source-loss, freshness,
+transition, signing, and transport behavior has not been implemented. Apple exposes no documented public API for
+system watts. The foreground spike qualifies selected laptop telemetry only for software-visible units, internal
+consistency, source freshness, workload response, mode transitions, and resource use.
+
+Code-only qualification does not establish physical accuracy. Any accepted value will be identified as
+**Apple-reported system power** from an undocumented source. It is not externally calibrated or billing-grade and must
+not be used for billing, settlement, or safety-critical decisions. Physical power meters are outside this project's
+scope and are not a qualification requirement.
 
 ```bash
 cargo run --quiet
 # stderr: WHOLE_SYSTEM_UNAVAILABLE
 # exit status: 2
 ```
+
+## Measurement spike
+
+The `spike` command reads only selected integer fields from the undocumented
+`AppleSmartBattery.PowerTelemetryData` dictionary through public IOKit registry functions. From Apple's public
+IOPowerSources API, it uses `Type` and `Is Present` only to select exactly one present `InternalBattery`; no matching
+battery or multiple matching batteries makes the read fail closed. These selection-only fields are not emitted to CSV.
+The direct public values retained for validation and CSV output are power mode, charging state, optional battery voltage,
+and optional signed current. The spike does **not** implement the production `PowerSource`.
+
+Each candidate uses a public/private/public bracket: the spike reads IOPowerSources, reads the private
+`PowerTelemetryData` candidate, then reads IOPowerSources again. Both public reads must validate and report the same
+classifiable AC or battery mode. Candidate selection and validation use that stable mode. The monotonic boundaries must
+satisfy `reference_before_started <= reference_before_finished <= telemetry_finished <= reference_after_finished`, and
+the complete bracket must take no more than one second. Exactly one second is accepted.
+
+The CSV includes mode-selected `candidate_w`, separate `system_power_balance_relative_error` and
+`mode_crosscheck_relative_error` fields, source accumulator
+counts and values, and aggregate `hardware_update` state. Its acquisition-time columns are exactly `elapsed_ms`,
+`reference_before_started_elapsed_ms`, `reference_before_finished_elapsed_ms`,
+`telemetry_finished_elapsed_ms`, and `reference_after_finished_elapsed_ms`; `elapsed_ms` records the same boundary as
+`telemetry_finished_elapsed_ms`. Separate `reference_before_` and `reference_after_` columns record
+`platform_power_mode`, `battery_is_charging`, `battery_voltage_mv`, `battery_current_ma`, `battery_signed_w`, and
+`battery_discharge_w` for each public read.
+
+On AC, `candidate_w` is `SystemPowerIn`, which includes battery charging. On battery it is `SystemLoad`. Every selected
+candidate must be finite, greater than zero, and no more than 100 kW. All consistency comparisons use milliwatts and the
+exact rule `abs(a - b) <= max(1 mW, 0.01 * max(abs(a), abs(b)))`. The qualification protocol requires
+`SystemPowerIn` to match `SystemLoad + BatteryPower` in every accepted snapshot. The
+`system_power_balance_relative_error` field reports that mandatory three-field identity in both modes. The
+`mode_crosscheck_relative_error` field reports AC input versus voltage × current on AC and `SystemLoad` versus
+`abs(BatteryPower)` on battery. On battery, `BatteryPower` must be negative.
+
+Apple's public IOPowerSources API independently supplies power mode and charging state. The collector also allowlists
+its documented battery voltage and signed current when supplied. Missing optional fields remain empty rather than
+being inferred. Signed terminal power preserves Apple's current sign; `battery_discharge_w` is emitted as a magnitude
+only when the corresponding public read reports battery mode, not charging, and includes both voltage and current.
+These optional values are diagnostic only and do not prove physical accuracy.
+
+The command defaults to 10 samples at a 1,000 ms interval. `--samples` accepts the inclusive range 1–36,000, and
+`--interval-ms` accepts 100–60,000 ms. Both flags are optional and may appear at most once. The scheduled span from the
+first sample to the last, `(samples - 1) × interval_ms`, may not exceed ten hours (36,000,000 ms). This cap preserves the
+five-minute qualification runs while preventing accidentally long foreground runs. Run `help` or `--help` with no
+other arguments to print this usage and the ten-hour constraint to standard output and exit successfully:
+
+```text
+usage: remote-energy-meter-reporter [help | --help | spike [--samples 1..36000] [--interval-ms 100..60000]]
+constraint: (samples - 1) * interval-ms <= 36000000 (10 hours)
+```
+
+Raw captures and resource measurements are private local data. Before every capture, set `umask 077`; the
+`spike-data/` directory must be mode `0700`, and every capture or resource file in it must be mode `0600`. These
+commands also repair permissions on existing files before writing a new capture:
+
+```bash
+umask 077
+mkdir -p spike-data
+chmod 0700 spike-data
+find spike-data -type f -exec chmod 0600 {} +
+cargo run --release --locked -- spike --samples 300 --interval-ms 1000 \
+  > spike-data/idle-ac.csv
+```
+
+The command fails in controlled ways:
+
+| Condition | Standard error | Exit status |
+| --- | --- | ---: |
+| Invalid, unknown, repeated, missing, non-numeric, out-of-range, or over-ten-hour sampling arguments | `usage: remote-energy-meter-reporter [help \| --help \| spike [--samples 1..36000] [--interval-ms 100..60000]]` followed by the ten-hour constraint | 64 |
+| `spike` requested on a non-macOS platform | `WHOLE_SYSTEM_UNAVAILABLE` | 2 |
+| IOKit telemetry cannot be opened or read on macOS | `TELEMETRY_UNAVAILABLE: <reason>` | 3 |
+| A sample fails numeric safety checks | `TELEMETRY_UNAVAILABLE: <reason>` | 3 |
+| CSV header or row cannot be written to standard output | No additional diagnostic | 74 |
+
+The CSV contains elapsed acquisition timing, candidate power/voltage/current/energy fields, source accumulator
+counts/values, hardware-update state, and only the CSV-emitted public battery values listed above. The spike does not
+request machine identity fields, so the CSV contains no model, hostname, serial, hardware UUID, username, account, or
+MAC address. `/spike-data/` is gitignored. A physical Apple-laptop test is ignored in normal CI and can be run explicitly
+on qualifying hardware:
+
+```bash
+cargo test --locked --test macos_telemetry_live -- --ignored
+```
+
+Qualification uses one five-minute idle, CPU-load, and GPU-load run in each mode. The current bracketed matrix passes
+for AC and battery on the tested laptop. Each workload run's median exceeds its mode's idle median. Every selected
+candidate is finite, greater than zero, and at or below 100 kW; all direct checks use
+`abs(a - b) <= max(1 mW, 0.01 * max(abs(a), abs(b)))`.
+
+Freshness applies separately to `SystemPowerInAccumulatorCount` on AC and to both
+`SystemLoadAccumulatorCount` and `BatteryDischargeAccumulatorCount` on battery. For each counter, the first valid
+atomic accumulator/count/direct observation starts freshness age, and each positive count delta resets it. A zero delta
+is valid only before 90 monotonic seconds have elapsed; it is stale at exactly 90 seconds. A decrease or wrap fails
+immediately. One counter's advance cannot refresh another.
+
+A positive count delta closes a source-owned interval. Its accumulator delta divided by count delta must be finite,
+have the required sign, remain within the hard ceiling, and follow workload direction. Matching battery load and
+discharge intervals must be signed inverses under the direct-check tolerance. Direct process reads are not synchronized
+to Apple's private accumulator boundaries, so repeated values are not assigned to hidden intervals or presented as a
+pointwise accumulator-accuracy comparison.
+
+Reporter CPU must average below 0.5% of one core, and physical memory must remain below 30 MiB. A failed bracket,
+bounds check, direct consistency check, freshness check, accumulator sign/bounds/direction check, workload comparison,
+source read, or mode transition leaves that mode unsupported. The future signed reporter must emit
+`WHOLE_SYSTEM_UNAVAILABLE` immediately and on its normal cadence, clear prior-mode sample and accumulator baselines,
+and admit no new-mode value until a complete bracketed snapshot passes.
+
+The qualification run observed both physical mode transitions. Immediately after each transition, public mode changed
+before the private candidate did, so the bracketed collector rejected the stale prior-mode candidate with exit status
+3. It accepted the new mode only after the next source-owned update. See
+`docs/qualification/apple-silicon-preliminary.md` for the non-identifying aggregate results and exact limits. Physical
+power meters remain outside this project's scope; no software-consistency result is an accuracy claim.
 
 ## Security baseline
 
@@ -202,7 +319,8 @@ gh api --method PUT \
       "Local-setup reference scan",
       "Repository policy (hook self-tests)",
       "Rust (fmt + clippy + tests)",
-      "Rust dependency policy (audit + deny)"
+      "Rust dependency policy (audit + deny)",
+      "macOS ARM (compile + tests)"
     ]
   },
   "enforce_admins": true,
@@ -224,7 +342,7 @@ gh api --method PUT \
 JSON
 ```
 
-Verify the live policy through the API immediately. The response must show `strict: true`, all five check names above,
+Verify the live policy through the API immediately. The response must show `strict: true`, all six check names above,
 `enforce_admins: true`, `pull_requests: true`, `dismiss_stale_reviews: true`, `approvals: 0`,
 `conversations: true`, `force_pushes: false`, and `deletions: false`.
 
@@ -247,7 +365,7 @@ gh api \
 ```
 
 After protection is verified, create `dev` from the protected `main` baseline. All later work lands on `dev` or a feature
-branch and reaches `main` only through a pull request whose branch is up to date and whose five required checks pass.
+branch and reaches `main` only through a pull request whose branch is up to date and whose six required checks pass.
 Never push directly to `main`, including as an administrator. If a CI job is added, removed, or renamed, update and
 verify the required check contexts through the branch-protection API in the same pull request.
 

@@ -4,7 +4,16 @@
    exception is the fully reviewed initial `main` publication needed to create the server-side ref. The hook allows it
    only for the configured `origin` push URL when that destination has no refs. Apply and verify branch protection
    immediately after that push, before creating `dev` or accepting any other change.
-2. Understand and measure before changing. The Apple power source requires an external-meter spike before admission.
+2. Understand and measure before changing. Apple power admission requires independent AC and battery evidence from one
+   five-minute idle, CPU-load, and GPU-load run per candidate mode. Each run must cover the corrected monotonic
+   public/private/public bracket of no more than one second; stable matching mode; finite, positive, at-most-100-kW
+   selection; mandatory `SystemPowerIn = SystemLoad + BatteryPower` enforcement and all other direct checks under the
+   exact 1%-with-1-mW-floor tolerance; per-counter half-open 90-second freshness; finite, sign-correct, bounded
+   accumulator intervals; matching battery signed-inverse intervals; workload medians; transitions; and resource use.
+   Do not assign repeated process reads to Apple's hidden accumulator intervals. Existing captures that lack any
+   required field or per-run/per-counter derivation do not qualify a mode. This code-only evidence cannot establish
+   physical accuracy; accepted output must carry the documented non-calibration and non-billing limits. Physical power
+   meters are outside project scope and are not required.
 3. Write a regression/contract test first; then the minimal implementation; then refactor with tests green.
 4. Every increment ends wired into an executable demo. Do not land orphaned production code.
 5. Update README/design/protocol/security documentation and user changelog entries for what ships.
@@ -94,6 +103,7 @@ The required CI check names are:
 - `Repository policy (hook self-tests)`
 - `Rust (fmt + clippy + tests)`
 - `Rust dependency policy (audit + deny)`
+- `macOS ARM (compile + tests)`
 
 Release artifact signing/notarization checks become mandatory once packaging exists.
 

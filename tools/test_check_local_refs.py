@@ -36,6 +36,7 @@ class RuleTests(unittest.TestCase):
         samples = (
             "192.0.2.9 198.51.100.9 203.0.113.9",
             "device.example noreply@example.invalid",
+            "GitHub <noreply@github.com>",
             "00:00:5e:00:53:01",
             "~/project /Users/<you>/project /Volumes/<share>/project",
         )
@@ -71,6 +72,56 @@ class RuleTests(unittest.TestCase):
         for domain in domains:
             with self.subTest(domain=domain):
                 self.assertIn("email-address", self.rules("reader" + at + domain))
+
+    def test_accepts_exact_github_merge_identity(self) -> None:
+        for line in (
+            "GitHub <noreply@github.com>",
+            "GitHub <noreply@github.com>.",
+            "(GitHub <noreply@github.com>)",
+            '"GitHub <noreply@github.com>",',
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(self.rules(line), [])
+
+    def test_rejects_github_merge_identity_with_punctuation_attached_suffix(self) -> None:
+        at = "@"
+        dot = "."
+        identity = "GitHub <noreply" + at + "github" + dot + "com>"
+        for punctuation in ('"', "'", ".", ",", ";", ":", "!", "?", ")", "]", "}"):
+            with self.subTest(punctuation=punctuation):
+                self.assertIn("email-address", self.rules(identity + punctuation + "suffix"))
+
+    def test_rejects_github_merge_identity_near_misses(self) -> None:
+        at = "@"
+        dot = "."
+        cases = (
+            ("slash email boundary", "person/noreply" + at + "github" + dot + "com"),
+            ("at-sign email boundary", "foo" + at + "noreply" + at + "github" + dot + "com"),
+            ("punctuation email boundary", "!noreply" + at + "github" + dot + "com"),
+            ("invalid identity left boundary", "xGitHub <noreply" + at + "github" + dot + "com>"),
+            ("invalid identity right boundary", "GitHub <noreply" + at + "github" + dot + "com>suffix"),
+            (
+                "non-ASCII email boundary",
+                "\N{LATIN SMALL LETTER E WITH ACUTE}" + "noreply" + at + "github" + dot + "com",
+            ),
+        )
+
+        for boundary, value in cases:
+            with self.subTest(boundary=boundary, value=value):
+                self.assertIn("email-address", self.rules(value))
+
+    def test_rejects_other_github_address_variants(self) -> None:
+        at = "@"
+        dot = "."
+        values = (
+            "person" + at + "github" + dot + "com",
+            "noreply" + at + "github" + dot + "co",
+            "noreply" + at + "github" + dot + "com" + dot + "evil" + dot + "corp",
+        )
+
+        for value in values:
+            with self.subTest(value=value):
+                self.assertIn("email-address", self.rules(value))
 
     def test_rejects_lan_hostnames_before_delimiters(self) -> None:
         hostname = "device" + "." + "local"
