@@ -12,9 +12,12 @@ use remote_energy_meter_reporter::cli::{Command, SpikeOptions, parse_args, usage
 use remote_energy_meter_reporter::macos_telemetry::AppleBatteryTelemetryReader;
 use remote_energy_meter_reporter::power::{PowerSource, UnavailablePowerSource};
 #[cfg(target_os = "macos")]
-use remote_energy_meter_reporter::spike::RawPowerTelemetry;
+use remote_energy_meter_reporter::spike::{
+    BracketedTelemetry, HardwareUpdate, RawBatteryReference, RawPowerTelemetry, ValidatedTelemetry,
+    acquire_bracketed_telemetry,
+};
 
-/// Existing reporter status for unavailable or unqualified power data.
+/// Existing reporter status for unavailable or not-yet-code-qualified power data.
 const EXIT_POWER_UNAVAILABLE: u8 = 2;
 #[cfg(target_os = "macos")]
 /// Spike-specific status for an unavailable or invalid telemetry sample.
@@ -60,6 +63,59 @@ fn fail_closed_status() -> ExitCode {
 }
 
 #[cfg(target_os = "macos")]
+fn write_spike_csv_header(output: &mut impl Write) -> io::Result<()> {
+    let raw_fields = RawPowerTelemetry::csv_header();
+    let qualification_fields = ValidatedTelemetry::qualification_csv_header();
+    let reference_before_fields = RawBatteryReference::csv_header_with_prefix("reference_before");
+    let reference_after_fields = RawBatteryReference::csv_header_with_prefix("reference_after");
+    writeln!(
+        output,
+        "{raw_fields},\
+         {qualification_fields},\
+         hardware_update,\
+         reference_before_started_elapsed_ms,\
+         reference_before_finished_elapsed_ms,\
+         telemetry_finished_elapsed_ms,\
+         reference_after_finished_elapsed_ms,\
+         {reference_before_fields},\
+         {reference_after_fields}"
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn write_spike_csv_row(
+    output: &mut impl Write,
+    acquisition: BracketedTelemetry,
+    hardware_update: HardwareUpdate,
+    sample_index: u64,
+) -> io::Result<()> {
+    let sample = acquisition.sample();
+    let boundaries = acquisition.boundaries();
+    let elapsed_ms = |elapsed: Duration| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+    let raw_fields = sample.to_csv_row(elapsed_ms(boundaries.telemetry_finished), sample_index);
+    let qualification_fields = sample.qualification_csv_fields();
+    let hardware_update = hardware_update.csv_value();
+    let reference_before_started_elapsed_ms = elapsed_ms(boundaries.reference_before_started);
+    let reference_before_finished_elapsed_ms = elapsed_ms(boundaries.reference_before_finished);
+    let telemetry_finished_elapsed_ms = elapsed_ms(boundaries.telemetry_finished);
+    let reference_after_finished_elapsed_ms = elapsed_ms(boundaries.reference_after_finished);
+    let reference_before_fields = acquisition.reference_before().csv_fields();
+    let reference_after_fields = acquisition.reference_after().csv_fields();
+    writeln!(
+        output,
+        "{raw_fields},\
+         {qualification_fields},\
+         {hardware_update},\
+         {reference_before_started_elapsed_ms},\
+         {reference_before_finished_elapsed_ms},\
+         {telemetry_finished_elapsed_ms},\
+         {reference_after_finished_elapsed_ms},\
+         {reference_before_fields},\
+         {reference_after_fields}"
+    )
+}
+
+#[cfg(target_os = "macos")]
 fn run_spike(options: SpikeOptions) -> ExitCode {
     let mut reader = match AppleBatteryTelemetryReader::open() {
         Ok(reader) => reader,
@@ -70,29 +126,32 @@ fn run_spike(options: SpikeOptions) -> ExitCode {
     };
     let stdout = io::stdout();
     let mut output = stdout.lock();
-    if writeln!(output, "{}", RawPowerTelemetry::csv_header()).is_err() {
+    if write_spike_csv_header(&mut output).is_err() {
         return ExitCode::from(EXIT_IO_ERROR);
     }
     let started = Instant::now();
+    let mut previous = None;
     for sample_index in 0..options.samples {
-        let raw = match reader.read_raw() {
-            Ok(raw) => raw,
+        let acquisition = match acquire_bracketed_telemetry(&mut reader, || started.elapsed()) {
+            Ok(acquisition) => acquisition,
             Err(error) => {
                 eprintln!("TELEMETRY_UNAVAILABLE: {error}");
                 return ExitCode::from(EXIT_TELEMETRY_UNAVAILABLE);
             }
         };
-        let sample = match raw.validate() {
-            Ok(sample) => sample,
-            Err(_) => {
-                eprintln!(
-                    "TELEMETRY_UNAVAILABLE: candidate telemetry failed numeric safety checks"
-                );
-                return ExitCode::from(EXIT_TELEMETRY_UNAVAILABLE);
-            }
+        let sample = acquisition.sample();
+        let hardware_update = match previous {
+            Some(previous) => match sample.update_since(previous) {
+                Ok(update) => update,
+                Err(error) => {
+                    eprintln!("TELEMETRY_UNAVAILABLE: {error}");
+                    return ExitCode::from(EXIT_TELEMETRY_UNAVAILABLE);
+                }
+            },
+            None => HardwareUpdate::Initial,
         };
-        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        if writeln!(output, "{}", sample.to_csv_row(elapsed_ms, sample_index)).is_err() {
+        previous = Some(sample);
+        if write_spike_csv_row(&mut output, acquisition, hardware_update, sample_index).is_err() {
             return ExitCode::from(EXIT_IO_ERROR);
         }
         if sample_index + 1 < options.samples {

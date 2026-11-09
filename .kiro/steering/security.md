@@ -25,7 +25,27 @@ Treat every commit and release artifact as publication.
 
 ## Measurement integrity and privacy
 
-- Publish only externally qualified whole-system watts. Never relabel CPU/GPU/package/estimated values.
+- Security and privacy take priority over qualification progress. Fail closed rather than accepting incomplete,
+  ambiguous, stale, cross-mode, or unreviewed evidence.
+- Publish Apple-reported system power only after the candidate mode independently passes one five-minute idle,
+  CPU-load, and GPU-load run under the documented public/private/public bracket, direct consistency, per-counter
+  freshness, accumulator sign/bounds/direction, matching battery signed-inverse, workload-median, transition, and
+  resource criteria. Never relabel CPU/GPU/package values.
+- Each bracket must use monotonic public-before/private/public-after boundaries in nondecreasing order, complete in no
+  more than one second, and have matching classifiable modes in both public reads. A mode change or invalid bracket
+  fails closed.
+- Every selected mode candidate must be finite, greater than zero, and no more than 100 kW. Every accepted snapshot
+  must satisfy `SystemPowerIn = SystemLoad + BatteryPower` under the exact milliwatt comparison
+  `abs(a - b) <= max(1 mW, 0.01 * max(abs(a), abs(b)))`. Battery mode additionally requires negative
+  `BatteryPower` whose magnitude matches `SystemLoad` under that rule.
+- Enforce freshness separately for every mandatory mode-specific counter. A zero delta is valid only before the
+  half-open 90-second deadline measured from the initial observation or latest positive delta; exactly 90 seconds is
+  stale. An advance by one counter does not refresh another. A positive count delta closes a source-owned accumulator
+  interval whose mean must be finite, correctly signed, bounded, and directionally consistent; matching battery
+  load/discharge intervals must be signed inverses. Do not assign repeated process reads to hidden source intervals.
+- State that code-only qualification does not establish physical accuracy. Never call the source externally calibrated
+  or billing-grade, and never recommend it for billing, settlement, or safety-critical decisions. Physical power
+  meters are outside this project's scope and are not a qualification requirement.
 - Fail closed with `WHOLE_SYSTEM_UNAVAILABLE` when the source is missing, stale, invalid, or unqualified.
 - Never transmit hardware serial/UUID, username/account, MAC, or client wall-clock timestamp.
 - Store every raw capture in the repository-root `./spike-data/` directory. Only that directory is covered by the

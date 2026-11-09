@@ -3,8 +3,10 @@
 
 //! Native whole-system power reporting primitives.
 //!
-//! The first implementation is deliberately unavailable: Apple-silicon support is admitted only
-//! after the hardware spike proves the candidate telemetry against an external wall meter.
+//! Code-only qualification completed on the tested Apple-silicon laptop, validating
+//! software-visible semantics and behavior. The production reporter remains unavailable until the
+//! documented release gates pass, and the result does not establish externally calibrated or
+//! billing-grade accuracy.
 
 pub mod cli;
 pub mod power;
