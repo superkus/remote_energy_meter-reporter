@@ -18,6 +18,7 @@ DENYLIST_FILE = ".local-refs-denylist"
 DENYLIST_ENV = "LOCAL_REFS_DENYLIST"
 UNSUPPORTED_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".ico", ".zip", ".gz", ".pyc"})
 ALLOW_MARKER = "local-refs:" + " allow"
+GITHUB_MERGE_IDENTITY = "GitHub <noreply@github.com>"
 MAX_TEXT_BYTES = 8 * 1024 * 1024
 MAX_PATH_BYTES = 4096
 MAX_REF_BYTES = 4096
@@ -90,7 +91,7 @@ RULES = (
     ),
     Rule(
         "email-address",
-        # Exempt image names such as icon@2x.png, reserved domains, and GitHub's public noreply domain.
+        # Exempt image names, reserved domains, and GitHub's public user noreply domain.
         re.compile(
             r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@(?!(?:\d+x)\.)"
             r"(?!(?:[A-Za-z0-9-]+\.)*(?:example(?:\.(?:com|net|org))?|invalid|test|localhost)(?![A-Za-z0-9.-]))"
@@ -274,6 +275,26 @@ def load_denylist(repo_root: Path, budget: ScanBudget | None = None) -> tuple[st
     return tuple(terms)
 
 
+def is_exact_github_merge_identity(line: str, match: re.Match[str]) -> bool:
+    """Return whether an email match belongs to GitHub's exact merge identity."""
+    email_offset = GITHUB_MERGE_IDENTITY.find(match.group())
+    if email_offset < 0:
+        return False
+    identity_start = match.start() - email_offset
+    identity_end = identity_start + len(GITHUB_MERGE_IDENTITY)
+    if identity_start < 0 or line[identity_start:identity_end] != GITHUB_MERGE_IDENTITY:
+        return False
+    left_boundaries = (" ", "\t", '"', "'", "(", "[", "{", ":")
+    right_separators = (" ", "\t")
+    right_wrappers = ('"', "'", ".", ",", ")")
+    left_boundary = identity_start == 0 or line[identity_start - 1] in left_boundaries
+    wrapper_end = identity_end
+    while wrapper_end < len(line) and line[wrapper_end] in right_wrappers:
+        wrapper_end += 1
+    right_boundary = wrapper_end == len(line) or line[wrapper_end] in right_separators
+    return left_boundary and right_boundary
+
+
 def scan_text(
     location: str,
     text: str,
@@ -294,7 +315,9 @@ def scan_text(
         for rule in RULES:
             if budget is not None:
                 budget.debit_work()
-            for _match in rule.pattern.finditer(line):
+            for match in rule.pattern.finditer(line):
+                if rule.name == "email-address" and is_exact_github_merge_identity(line, match):
+                    continue
                 if budget is not None:
                     budget.record_finding()
                 yield Finding(location, number, rule.name, rule.hint)
