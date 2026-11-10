@@ -1,0 +1,4 @@
+source_repository: superkus/remote_energy_meter
+source_path: docs/protocol/v1
+profile_version: 1
+source_commit: ad4fb43b413d2e27ad842d3a790aa8ecd8dcf103

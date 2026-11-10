@@ -133,6 +133,212 @@ before the private candidate did, so the bracketed collector rejected the stale 
 `docs/qualification/apple-silicon-preliminary.md` for the non-identifying aggregate results and exact limits. Physical
 power meters remain outside this project's scope; no software-consistency result is an accuracy claim.
 
+## Protocol v1 primitives (draft)
+
+**Draft, not approved for distribution, and pending independent security review.** The `protocol_v1` library module
+implements the Rust half of protocol task 3.2 against the server-owned REM protocol v1 profile, which is vendored
+byte-for-byte under `tests/fixtures/protocol/v1/` at the commit recorded in `PROVENANCE.txt`. That profile is itself a
+normative draft: task 3.4's independent security review must approve it before any reporter build that speaks it is
+distributed. Nothing in this repository listens on or sends the protocol; the reporter executable is unchanged and still
+exits with `WHOLE_SYSTEM_UNAVAILABLE`.
+
+The module provides strict, fail-closed primitives. Every failure returns only a closed problem class, never request
+input or key material.
+
+- `b64u`: canonical unpadded base64url with exact (`b64u<n>`) or inclusive 1–*n* (`opaque128`/`opaque256`) decoded
+  lengths; padding, whitespace, the standard alphabet, and non-zero trailing bits are rejected. `Debug` never prints
+  value bytes, and equality compares decoded values in constant time.
+- `transcript`: the `REM-TRANSCRIPT` encoding and exact decoder. `encode_transcript` validates the purpose and each
+  field-name label as non-empty visible ASCII of at most 65,535 bytes; `TranscriptField::new` only constructs a
+  candidate. Encoding also rejects duplicate names and enforces a caller cap (4096 bytes for every bounded transcript)
+  before allocation. The exact decoder rejects unexpected field order and unknown or omitted fields.
+- `canonical_json`: exact `rem-canonical-json-v1` checks (no BOM or insignificant whitespace outside strings; whitespace
+  remains valid as string content; sorted ASCII member names; canonical escapes; non-negative canonical integers within
+  `uint64`; at most six non-trailing-zero fraction digits; depth 8; 64 KiB). Accepted bytes are kept, never
+  re-serialized. Schema validation is not part of this module.
+- `jwk`: the exact four-member canonical P-256 public JWK; duplicate, extra, and private `d` members, other orders,
+  whitespace, off-curve points, and coordinates outside the field are rejected. RFC 7638 canonical bytes and the SHA-256
+  thumbprint (`keyid`) are exposed.
+- `content_digest`: the single-member RFC 9530 `sha-256=:…:` form (at most 256 bytes) with constant-time body
+  verification.
+- `signature`: 64-byte IEEE P1363 ECDSA P-256/SHA-256 verification that rejects other lengths, zero or out-of-range
+  scalars, and high-S signatures. DER is never accepted.
+- `routes`: a compiled route table that a test compares field by field with the vendored `routes.json` for the
+  in-scope admission fields, while explicitly accounting for the deferred schema and stateful-replay fields. Lookup
+  validates the exact method, the 256-byte target cap, the narrow target grammar (no percent encoding, fragments, dot or
+  empty segments, or trailing slash), typed path parameters, exact query forms, and the not-found/method-not-allowed
+  order.
+- `http_signature`: `reporter-rfc9421-v1` and `control-rfc9421-v1` verification in the profile's admission order:
+  route lookup, header caps, body cap and media type, framing headers, the exact REM header set, digest and canonical
+  body, then the signature step. HTTP-signature admission validates canonical lowercase IDNA2008 A-label authorities,
+  including numeric-address and reserved-LDH rejection. `RawRequest` is already buffered, including its authority and
+  body. The library authority and body cap checks are defense in depth: they cannot prevent the caller from allocating
+  oversized values first. Any later executable HTTP transport integration must enforce the 259-byte authority cap while
+  parsing, before buffering an oversized authority, and count body bytes while streaming so it can abort an oversized
+  request before allocating or buffering the full body.
+  Schema semantics are separately deferred and are not supplied by transport or library body caps. The verifier requires
+  the dispatcher-selected manifest route and rejects a target that resolves to another route before authentication.
+  `Signature-Input` and `Signature` accept only the profile's exact serialization; the base is rebuilt from the raw
+  method, authority, path, query, named query values, and trimmed header values. Every covered component, parameter,
+  purpose (including the body-mode selection for enrollment creation), `alg`, `keyid`, active and proposed control key
+  generations, nonce, and expiry is checked. Reporter `Signature-Input` carries no `created` or other client clock;
+  control `created`/`expires`/`nonce` freshness uses the caller's server receipt time. The `rem-proposed`
+  label is required on `control.control-key-rotation.complete` and rejected elsewhere. A successful verification returns
+  a stable, comparable `VerifiedIdentity` containing the complete exact request, its unambiguous length-delimited SHA-256
+  request hash, the principal identity supplied by the trusted key binding (not rederived from the rotatable `keyid`),
+  route, raw target and query, keyids, optional control generation/`created`/nonce/expiry, reporter session/sequence,
+  and digest for replay logic. Reporter identities contain no client-clock value. Stateful
+  replay protection itself is out of scope. The signer helper (`signature_material`) applies the same stateless
+  pre-signature parsing, caps, media-type, framing, digest, canonical-body, REM-header, and purpose checks before
+  producing its signature base. Contextual checks remain verifier responsibilities: dispatcher-selected route binding,
+  configured authority, trusted key and generation binding, and server-receipt-time freshness. Stateful replay remains
+  the caller's responsibility.
+
+### Demonstration
+
+```bash
+cargo run --locked --example protocol_v1_sign_demo
+```
+
+The example generates an **ephemeral software P-256 key in memory** from the system CSPRNG, signs one canonical report
+request, self-verifies it, and writes one machine-readable canonical JSON object to stdout. The closed object contains
+only the public JWK, stable identity, route, exact request method/authority/target/body and ordered headers as lowercase
+hex, `Signature-Input`, `Signature`, and the exact signature base. Reporter `Signature-Input` omits `created`. The
+private key is never serialized, printed, logged, or stored; the example sends nothing. **Production persistent reporter
+keys must be non-exportable System Keychain keys** used by a Developer ID-signed and notarized daemon; software keys
+are for demonstrations and tests only.
+
+The following network-free handoff uses a caller-provided local Git checkout or bare mirror of the server repository.
+It exports the server package from the verified commit, so working-tree changes cannot affect the check. Set
+`SERVER_PYTHON` to a Python 3.12 interpreter that already has that server commit's locked runtime dependencies; the
+procedure does not install or download anything.
+
+```bash
+REPORTER_SOURCE=/path/to/reporter-source
+SERVER_GIT=/path/to/server-git-checkout-or-bare-mirror
+SERVER_PYTHON=/path/to/python-with-server-runtime-dependencies
+SERVER_COMMIT=ad4fb43b413d2e27ad842d3a790aa8ecd8dcf103
+work_dir="$(mktemp -d)"
+trap 'rm -r "$work_dir"' EXIT
+
+git -C "$SERVER_GIT" cat-file -e "${SERVER_COMMIT}^{commit}"
+test "$(git -C "$SERVER_GIT" rev-parse "${SERVER_COMMIT}^{commit}")" = "$SERVER_COMMIT"
+mkdir "$work_dir/server"
+git -C "$SERVER_GIT" archive "$SERVER_COMMIT" | tar -x -C "$work_dir/server"
+cargo run --quiet --locked --manifest-path "$REPORTER_SOURCE/Cargo.toml" \
+  --example protocol_v1_sign_demo >"$work_dir/demo.json"
+
+PYTHONPATH="$work_dir/server/src" "$SERVER_PYTHON" - "$work_dir/demo.json" <<'PY'
+import base64
+import json
+import sys
+
+from remote_energy_meter.protocol_v1 import (
+    ProtocolViolation,
+    SignedRequest,
+    VerificationKey,
+    parse_p256_public_jwk,
+    route_profile,
+    verify_signed_request,
+)
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    demo = json.load(stream)
+wire = demo["request"]
+request = SignedRequest(
+    method=bytes.fromhex(wire["method_hex"]),
+    authority=bytes.fromhex(wire["authority_hex"]),
+    target=bytes.fromhex(wire["target_hex"]),
+    headers=tuple(
+        (bytes.fromhex(field["name_hex"]), bytes.fromhex(field["value_hex"]))
+        for field in wire["headers"]
+    ),
+    body=bytes.fromhex(wire["body_hex"]),
+)
+public_jwk = parse_p256_public_jwk(
+    json.dumps(demo["public_jwk"], separators=(",", ":")).encode("ascii")
+)
+key = VerificationKey(identity=demo["stable_identity"], public_jwk=public_jwk)
+verify_args = {
+    "route": route_profile(demo["route"]),
+    "keys": {"rem": key},
+    "expected_authority": b"ha.example.com:58443",
+    "received_at": 0,
+    "active_control_generation": None,
+}
+verified = verify_signed_request(request, **verify_args)
+assert verified.request == request
+assert verified.route_id == demo["route"]
+assert verified.verified_identity == demo["stable_identity"]
+assert dict(verified.signature_bases) == {
+    "rem": bytes.fromhex(demo["signature_base_hex"])
+}
+
+signature_header = next(value for name, value in request.headers if name == b"signature")
+assert signature_header.startswith(b"rem=:") and signature_header.endswith(b":")
+signature = bytearray(base64.b64decode(signature_header[5:-1], validate=True))
+signature[0] ^= 1
+mutated_header = b"rem=:" + base64.b64encode(signature) + b":"
+mutated_request = SignedRequest(
+    method=request.method,
+    authority=request.authority,
+    target=request.target,
+    headers=tuple(
+        (name, mutated_header if name == b"signature" else value)
+        for name, value in request.headers
+    ),
+    body=request.body,
+)
+try:
+    verify_signed_request(mutated_request, **verify_args)
+except ProtocolViolation as error:
+    assert error.code == "authentication_required"
+else:
+    raise AssertionError("one-byte signature mutation was accepted")
+PY
+```
+
+### Testing
+
+```bash
+cargo test --locked --all-features --example protocol_v1_sign_demo \
+  --test protocol_v1_fixture --test protocol_v1_primitives --test protocol_v1_http_signatures \
+  --test protocol_v1_admission --test protocol_v1_routes_manifest
+```
+
+The fixture test pins the vendored corpus's file set, every SHA-256, and the case and mutation counts. The vector tests
+re-encode every published bounded transcript, execute all six structural transcript mutations against the exact decoder,
+accept every published canonical JSON value, verify every JWK- and SPKI-backed transcript signature and reject its
+altered and high-S forms, reproduce all 25 HTTP signature cases and identities, and apply all 506 in-scope HTTP
+one-field mutations from `http-signatures.json` and the dual-key case in `key-rotations.json`, each of which must fail
+with its exact declared class. This includes executable duplicate-query-member mutations for both singleton roster
+snapshot forms. Further tests cover the signer round trip against every HTTP signature vector, output privacy and the
+closed machine-readable example schema, the dual-label route, server-time freshness edges, admission caps, and requests
+that a compromised key holder signs with internally inconsistent parameters. This coverage does not claim MQTT, HMAC,
+HKDF, SAS, schema, or stateful-replay conformance.
+
+### Dependencies and security behavior
+
+Runtime dependencies are exact-pinned and feature-minimized: `idna =1.1.0` (`default-features = false`, `alloc` and
+`compiled_data`), `p256 =0.14.0` (`default-features = false`, `ecdsa` only), `sha2 =0.11.1` and `subtle =2.6.1` (both
+`default-features = false`). The IDNA dependency validates canonical A-label authorities against its compiled Unicode
+data without network access. The `getrandom` feature of `p256` is enabled only as a development dependency for the
+example and tests, so the production dependency graph contains no random-number source. P-256 signing code from
+`p256`'s `ecdsa` feature is compiled into the library because that crate offers no verification-only feature; the
+library uses only verification. `cargo audit` and `cargo deny` cover the additions.
+
+### Remaining protocol work
+
+- The executable example provides the Rust-to-Python handoff used to verify a generated signature with the server package
+  from the pinned source commit and reject a one-byte mutation. It remains a local, network-free demonstration rather
+  than a persisted fixture or runtime transport.
+- Not implemented here: schema semantics or validation; stateful replay stores; executable HTTPS transport integration,
+  including streaming body counting and abort before full-body allocation; TLS connection, rate, and concurrency limits;
+  problem-response rendering; MQTT AEAD; enrollment; rotation; and System Keychain signing. Any later executable
+  integration remains blocked until its schema, stateful replay, and transport-layer admission work is implemented and
+  reviewed.
+- Task 3.4's independent security review of the profile and this implementation.
+
 ## Security baseline
 
 - No LAN, VPN, loopback, discovery result, or service network is trusted.

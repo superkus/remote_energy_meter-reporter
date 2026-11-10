@@ -10,6 +10,7 @@
 
 pub mod cli;
 pub mod power;
+pub mod protocol_v1;
 pub mod spike;
 
 #[cfg(target_os = "macos")]
