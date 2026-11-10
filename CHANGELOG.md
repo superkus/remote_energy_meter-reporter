@@ -9,6 +9,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Added a draft `protocol_v1` library module for the server-owned REM protocol v1 profile, vendored byte-for-byte with
+  pinned checksums. **The profile is not approved for distribution and awaits independent security review; nothing
+  listens on or sends the protocol, and the reporter executable is unchanged.** The module provides strict canonical
+  base64url with constant-time value equality, the bounded `REM-TRANSCRIPT` encoding and exact ordered decoder, exact
+  canonical JSON checks, exact canonical P-256 public JWKs with
+  on-curve validation and RFC 7638 thumbprints, the single-member RFC 9530 `sha-256` `Content-Digest` with
+  constant-time verification, 64-byte P1363 low-S ECDSA P-256 verification, manifest-driven route lookup that validates
+  exact methods, targets, and query forms, and narrow `reporter-rfc9421-v1`/`control-rfc9421-v1` request admission in
+  the profile's order. Request admission validates canonical IDNA2008 A-label authorities, including numeric-address and
+  reserved-LDH rejection, and includes dispatcher-selected route binding, the dual `rem`/`rem-proposed` route,
+  server-receipt-time control freshness, and a stable principal plus exact request/hash for later replay and exact-retry
+  handling. `RawRequest` already contains a fully buffered body, so the library body-cap check is defense in depth. Any
+  later executable HTTP transport integration must count body bytes and abort oversized requests while streaming, before
+  allocating or buffering the full body. Schema semantics remain separately deferred. Stateful replay protection and
+  later executable integration are not included. Tests pin the corpus file set, checksums, and counts; re-encode every
+  published bounded transcript; execute all six structural transcript mutations; accept every published canonical JSON
+  value; verify the JWK- and SPKI-backed transcript signatures and their altered and high-S rejection cases; reproduce
+  all 25 HTTP signature cases and identities; and execute all 506 in-scope HTTP one-field mutations plus the dual-key
+  rotation case with their declared failures, including both singleton snapshot duplicate-query-member mutations. This
+  does not claim MQTT, HMAC, HKDF, SAS, schema, or stateful-replay conformance. Reporter signatures and identities omit
+  client `created` entirely while control `created`/`expires`/`nonce` freshness remains bound to server receipt time. A
+  demonstration example generates an ephemeral in-memory key, self-verifies, and emits a closed canonical JSON object
+  containing only public verification material and exact request bytes for a server Python verifier; persistent
+  reporter keys must use the System Keychain. Task 3.4's
+  independent security review must approve the profile and implementation before distribution. New exact-pinned,
+  feature-minimized runtime dependencies: `idna` 1.1.0 (`alloc`, `compiled_data`), `p256` 0.14.0 (`ecdsa`), `sha2`
+  0.11.1, and `subtle` 2.6.1.
 - Added the foreground Apple-silicon telemetry spike: a direct, ownership-safe IOKit reader for selected
   `AppleSmartBattery.PowerTelemetryData` integers and source-owned accumulators; a public IOPowerSources reader that
   uses `Type` and `Is Present` only to require exactly one present `InternalBattery`, fails closed if none or multiple
