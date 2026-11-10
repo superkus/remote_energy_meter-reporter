@@ -136,8 +136,8 @@ power meters remain outside this project's scope; no software-consistency result
 ## Protocol v1 primitives (draft)
 
 **Draft, not approved for distribution, and pending independent security review.** The `protocol_v1` library module
-implements the Rust half of protocol task 3.2 against the server-owned REM protocol v1 profile, which is vendored
-byte-for-byte under `tests/fixtures/protocol/v1/` at the commit recorded in `PROVENANCE.txt`. That profile is itself a
+implements the Rust half of protocol task 3.2 and the Rust SAS half of task 3.3 against the server-owned REM protocol
+v1 profile, which is vendored byte-for-byte under `tests/fixtures/protocol/v1/` at the commit recorded in `PROVENANCE.txt`. That profile is itself a
 normative draft: task 3.4's independent security review must approve it before any reporter build that speaks it is
 distributed. Nothing in this repository listens on or sends the protocol; the reporter executable is unchanged and still
 exits with `WHOLE_SYSTEM_UNAVAILABLE`.
@@ -163,6 +163,10 @@ input or key material.
   verification.
 - `signature`: 64-byte IEEE P1363 ECDSA P-256/SHA-256 verification that rejects other lengths, zero or out-of-range
   scalars, and high-S signatures. DER is never accepted.
+- `sas`: exact six-byte interactive SAS derivation with SHA-256 and HKDF-SHA-256, plus exact alternating
+  Even/Odd rendering, strict six-word ASCII parsing, and constant-time authentication-byte verification. The production
+  library embeds no word data; callers load separately distributed resources through a length-, hash-, and
+  structure-pinned `SasWordLists`.
 - `routes`: a compiled route table that a test compares field by field with the vendored `routes.json` for the
   in-scope admission fields, while explicitly accounting for the deferred schema and stateful-replay fields. Lookup
   validates the exact method, the 256-byte target cap, the narrow target grammar (no percent encoding, fragments, dot or
@@ -217,7 +221,7 @@ procedure does not install or download anything.
 REPORTER_SOURCE=/path/to/reporter-source
 SERVER_GIT=/path/to/server-git-checkout-or-bare-mirror
 SERVER_PYTHON=/path/to/python-with-server-runtime-dependencies
-SERVER_COMMIT=ad4fb43b413d2e27ad842d3a790aa8ecd8dcf103
+SERVER_COMMIT=13d9b3e67b68a4bc3f3ce473c0ac7dae125849ed
 work_dir="$(mktemp -d)"
 trap 'rm -r "$work_dir"' EXIT
 
@@ -298,12 +302,24 @@ else:
 PY
 ```
 
+The SAS demonstration reads the two licensed tables from explicit paths rather than embedding them in the production
+library. Each path is read through a 2,408-byte hard cap, so an oversized resource is rejected before unbounded
+allocation. For the pinned interactive vector it prints the exact six bytes and six-word phrase:
+
+```bash
+cargo run --quiet --locked --example protocol_v1_sas_demo -- \
+  tests/fixtures/protocol/v1/pgp-word-list/even.txt \
+  tests/fixtures/protocol/v1/pgp-word-list/odd.txt
+# 4df104cfb9f9
+# dreadful vacancy adrift Saturday sentence Waterloo
+```
+
 ### Testing
 
 ```bash
-cargo test --locked --all-features --example protocol_v1_sign_demo \
+cargo test --locked --all-features --example protocol_v1_sign_demo --example protocol_v1_sas_demo \
   --test protocol_v1_fixture --test protocol_v1_primitives --test protocol_v1_http_signatures \
-  --test protocol_v1_admission --test protocol_v1_routes_manifest
+  --test protocol_v1_admission --test protocol_v1_routes_manifest --test protocol_v1_sas
 ```
 
 The fixture test pins the vendored corpus's file set, every SHA-256, and the case and mutation counts. The vector tests
@@ -311,21 +327,36 @@ re-encode every published bounded transcript, execute all six structural transcr
 accept every published canonical JSON value, verify every JWK- and SPKI-backed transcript signature and reject its
 altered and high-S forms, reproduce all 25 HTTP signature cases and identities, and apply all 506 in-scope HTTP
 one-field mutations from `http-signatures.json` and the dual-key case in `key-rotations.json`, each of which must fail
-with its exact declared class. This includes executable duplicate-query-member mutations for both singleton roster
+with its exact declared class. The SAS tests independently reproduce the merged interactive vector's transcript,
+SHA-256 salt, HKDF output, and phrase; cover all 256 indexes in every one of six positions; enforce exact ASCII,
+case, list parity, punctuation, and spacing; exercise nonce/transcript/phrase boundaries; and reject one valid-word
+mutation in every position. This includes executable duplicate-query-member mutations for both singleton roster
 snapshot forms. Further tests cover the signer round trip against every HTTP signature vector, output privacy and the
-closed machine-readable example schema, the dual-label route, server-time freshness edges, admission caps, and requests
-that a compromised key holder signs with internally inconsistent parameters. This coverage does not claim MQTT, HMAC,
-HKDF, SAS, schema, or stateful-replay conformance.
+closed machine-readable example schema, caller-resource SAS rendering, the dual-label route, server-time freshness
+edges, admission caps, and requests that a compromised key holder signs with internally inconsistent parameters. This
+coverage does not claim MQTT, managed-token HMAC, schema, or stateful-replay conformance.
 
 ### Dependencies and security behavior
 
-Runtime dependencies are exact-pinned and feature-minimized: `idna =1.1.0` (`default-features = false`, `alloc` and
-`compiled_data`), `p256 =0.14.0` (`default-features = false`, `ecdsa` only), `sha2 =0.11.1` and `subtle =2.6.1` (both
-`default-features = false`). The IDNA dependency validates canonical A-label authorities against its compiled Unicode
+Runtime dependencies are exact-pinned and feature-minimized: `hkdf =0.13.0`, `idna =1.1.0` (`default-features = false`,
+`alloc` and `compiled_data`), `p256 =0.14.0` (`default-features = false`, `ecdsa` only), `sha2 =0.11.1` and
+`subtle =2.6.1` (all use `default-features = false`; `idna` enables only `alloc` and `compiled_data`, and `p256` only
+`ecdsa`). `hkdf` is used only for the fixed HKDF-SHA-256 extract/expand operation needed by the six-byte SAS. The IDNA
+dependency validates canonical A-label authorities against its compiled Unicode
 data without network access. The `getrandom` feature of `p256` is enabled only as a development dependency for the
 example and tests, so the production dependency graph contains no random-number source. P-256 signing code from
 `p256`'s `ecdsa` feature is compiled into the library because that crate offers no verification-only feature; the
 library uses only verification. `cargo audit` and `cargo deny` cover the additions.
+
+### Word-list data license
+
+All Rust code, tests, examples, and ordinary documentation remain MIT licensed. Only
+`tests/fixtures/protocol/v1/pgp-word-list/even.txt` and `odd.txt` are GFDL-1.2-only data. Their adjacent
+`notice.md` records the source, authorship, extraction, hashes, and redistribution boundary; `gfdl-1.2.txt` is the full
+applicable license. The production library does not embed these files. Tests and the SAS demonstration read them as
+caller-provided resources. Later packaging must ship any byte-identical data copies as separate files with the complete
+adjacent notice and license, and must identify those copies as GFDL-1.2-only without changing the MIT license on Rust
+code.
 
 ### Remaining protocol work
 
@@ -334,7 +365,8 @@ library uses only verification. `cargo audit` and `cargo deny` cover the additio
   than a persisted fixture or runtime transport.
 - Not implemented here: schema semantics or validation; stateful replay stores; executable HTTPS transport integration,
   including streaming body counting and abort before full-body allocation; TLS connection, rate, and concurrency limits;
-  problem-response rendering; MQTT AEAD; enrollment; rotation; and System Keychain signing. Any later executable
+  problem-response rendering; MQTT AEAD; enrollment state-machine integration around the implemented SAS primitives;
+  rotation; and System Keychain signing. Any later executable
   integration remains blocked until its schema, stateful replay, and transport-layer admission work is implemented and
   reviewed.
 - Task 3.4's independent security review of the profile and this implementation.

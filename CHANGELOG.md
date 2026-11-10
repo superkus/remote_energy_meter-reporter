@@ -9,6 +9,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Implemented the Rust half of protocol Task 3.3: exact six-byte interactive SAS derivation using the transcript's
+  SHA-256 digest as HKDF-SHA-256 salt, `reporter_nonce || core_nonce` input, fixed profile info, and six-byte output;
+  exact alternating Even/Odd rendering; strict bounded six-word ASCII parsing; and constant-time authentication-byte
+  verification. A hash-pinned `SasWordLists` loader accepts caller-provided resources so the MIT production library
+  embeds no GFDL data, and the demonstration bounds each resource read before allocation and validation. Tests load the
+  exact server-owned 256-entry tables from the vendored profile and cover every index in every position, known PGP
+  examples, the merged interactive vector, boundaries, and word/list/case/punctuation/spacing mutations. The vendored
+  profile now includes the adjacent attribution notice and full GFDL 1.2 license. Rust code, tests, examples, and
+  ordinary documentation remain MIT; only the Even/Odd data files and any byte-identical copies are GFDL-1.2-only.
+  Added exact-pinned, default-feature-free `hkdf` 0.13.0 for the fixed HKDF operation.
+
 - Added a draft `protocol_v1` library module for the server-owned REM protocol v1 profile, vendored byte-for-byte with
   pinned checksums. **The profile is not approved for distribution and awaits independent security review; nothing
   listens on or sends the protocol, and the reporter executable is unchanged.** The module provides strict canonical
@@ -28,8 +39,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   value; verify the JWK- and SPKI-backed transcript signatures and their altered and high-S rejection cases; reproduce
   all 25 HTTP signature cases and identities; and execute all 506 in-scope HTTP one-field mutations plus the dual-key
   rotation case with their declared failures, including both singleton snapshot duplicate-query-member mutations. This
-  does not claim MQTT, HMAC, HKDF, SAS, schema, or stateful-replay conformance. Reporter signatures and identities omit
-  client `created` entirely while control `created`/`expires`/`nonce` freshness remains bound to server receipt time. A
+  does not claim MQTT, managed-token HMAC, schema, or stateful-replay conformance. Reporter signatures and identities
+  omit client `created` entirely while control `created`/`expires`/`nonce` freshness remains bound to server receipt time. A
   demonstration example generates an ephemeral in-memory key, self-verifies, and emits a closed canonical JSON object
   containing only public verification material and exact request bytes for a server Python verifier; persistent
   reporter keys must use the System Keychain. Task 3.4's
