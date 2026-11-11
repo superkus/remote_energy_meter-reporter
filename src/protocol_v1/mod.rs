@@ -4,7 +4,7 @@
 //! vendored byte-for-byte under `tests/fixtures/protocol/v1` (see `PROVENANCE.txt`). The profile
 //! itself is a normative draft: task 3.4's independent security review must approve it before any
 //! reporter build that speaks it is distributed. Nothing in this crate listens on or sends this
-//! protocol yet; the only executable consumer is the `protocol_v1_sign_demo` example.
+//! protocol yet; the executable consumers are the network-free protocol demonstrations.
 //!
 //! Every parser is strict and fails closed:
 //!
@@ -14,6 +14,8 @@
 //! - [`jwk`]: exact canonical P-256 public JWKs, on-curve validation, and RFC 7638 thumbprints.
 //! - [`content_digest`]: the single-member RFC 9530 `sha-256` `Content-Digest` form.
 //! - [`signature`]: 64-byte IEEE P1363 low-S ECDSA P-256/SHA-256 verification.
+//! - [`sas`]: exact six-byte interactive SAS derivation, caller-resource word-list validation,
+//!   alternating Even/Odd rendering, strict ASCII parsing, and constant-time verification.
 //! - [`routes`]: route lookup from the vendored route manifest, with exact target and query forms.
 //! - [`http_signature`]: canonical IDNA2008 authority checks and the narrow
 //!   `reporter-rfc9421-v1` and `control-rfc9421-v1` profiles.
@@ -35,6 +37,7 @@ pub mod content_digest;
 pub mod http_signature;
 pub mod jwk;
 pub mod routes;
+pub mod sas;
 pub mod signature;
 pub mod transcript;
 

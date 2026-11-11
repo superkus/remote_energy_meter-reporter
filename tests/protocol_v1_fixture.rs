@@ -7,7 +7,23 @@ use support::{fixture, fixture_files, fixture_text, hex_encode, parse_json, sha2
 const SOURCE_FILES: &[(&str, &str)] = &[
     (
         "README.md",
-        "8b939f4d7885e4248115c761c47ed78cc292e466455977beba3b5ffad13f898b",
+        "d9ec852c0164d7155ebe6658c3d062000b0bff77454dffdf757033d576291bf0",
+    ),
+    (
+        "pgp-word-list/even.txt",
+        "37a65f88512467edd12a1ab3eeb5f4328230e86711a8efde6333361ce10f4fcf",
+    ),
+    (
+        "pgp-word-list/gfdl-1.2.txt",
+        "2652c22ba086f92e55ae4a9f9c890ad4766ffd7814a73d318e22a597edf857a4",
+    ),
+    (
+        "pgp-word-list/notice.md",
+        "10163dd18c1d3f3100e6129185138d9a6a99cf89939ae86659be649f9e6b0f3f",
+    ),
+    (
+        "pgp-word-list/odd.txt",
+        "c2f23c2233d4d7291107e8f796c374d0cb1fb30c1391bcb4f6480243de8ebf5a",
     ),
     (
         "routes.json",
@@ -35,11 +51,11 @@ const SOURCE_FILES: &[(&str, &str)] = &[
     ),
     (
         "schemas/vector.schema.json",
-        "df06128903e3a60e9792031471588966a6646c67d3c324eb824ebeb9a8466cf5",
+        "7ea7e9f18ffc90fac1125c1dc683870f5b1ca2ee8a3cc3964e50c291169220e4",
     ),
     (
         "threat-model.md",
-        "da31a0c1b516dc53dd6eb9a3f986405afce1599fa19a35daf8a921c28cf82d1f",
+        "3b33467017e545c212b06c64835d7e8bb826237fd61890b3eeeee7ccf2e28ce5",
     ),
     (
         "vectors/common.json",
@@ -55,7 +71,7 @@ const SOURCE_FILES: &[(&str, &str)] = &[
     ),
     (
         "vectors/interactive-enrollment.json",
-        "1d19b6a1aa3bc7226165682fd7f831a0cc9f7b5b6b5ebae6b993b9aa6422f36d",
+        "195e6a4f9c2a1a7e4043df714f757ed71b7f077baa8b717d1ccc40834cda7423",
     ),
     (
         "vectors/key-rotations.json",
@@ -71,7 +87,7 @@ const SOURCE_FILES: &[(&str, &str)] = &[
     ),
     (
         "vectors/manifest.json",
-        "08b06d20d6463c5f805cd2a584d86ebd170a140360d7e32b14121c74eddf6490",
+        "e73fdd32df263d2cb5f9a48df07cdf1f6028fc8fc45383a720ea92aaa250c16d",
     ),
     (
         "vectors/mqtt-v2-aead.json",
@@ -79,12 +95,13 @@ const SOURCE_FILES: &[(&str, &str)] = &[
     ),
     (
         "wire-profile.md",
-        "6b0aa172a6b7825408c421015ecb6bb18ce0d9242cd7144c0ebed233cc09c41e",
+        "e0fa848ec9bc8e1717c5ade17f6d7317fb60d69b91f4c6a6d6345b10f0799c9a",
     ),
 ];
 
 #[test]
 fn vendored_protocol_corpus_has_exact_pinned_file_set_and_bytes() {
+    assert_eq!(SOURCE_FILES.len(), 23);
     let expected: BTreeSet<_> = SOURCE_FILES
         .iter()
         .map(|(path, _)| (*path).to_owned())
@@ -112,7 +129,7 @@ fn provenance_pins_the_server_owned_profile_without_local_installation_data() {
             "source_repository: superkus/remote_energy_meter\n",
             "source_path: docs/protocol/v1\n",
             "profile_version: 1\n",
-            "source_commit: ad4fb43b413d2e27ad842d3a790aa8ecd8dcf103\n",
+            "source_commit: 13d9b3e67b68a4bc3f3ce473c0ac7dae125849ed\n",
         )
     );
 }
@@ -247,7 +264,7 @@ fn manifest_metadata_file_checksums_and_case_sets_are_complete() {
     }
 
     let contracts = manifest.member("contract_files").array();
-    assert_eq!(contracts.len(), 8);
+    assert_eq!(contracts.len(), 12);
     for entry in contracts {
         let path = entry.member("path").string();
         assert_eq!(
